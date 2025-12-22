@@ -7,9 +7,6 @@ app = FastAPI()
 
 @app.post("/cut")
 def cut_video(url: str, start: str, end: str):
-    """
-    start et end au format HH:MM:SS
-    """
     job_id = str(uuid.uuid4())
     tmp = tempfile.gettempdir()
     input_file = os.path.join(tmp, f"{job_id}_in.mp4")
@@ -35,11 +32,11 @@ def cut_video(url: str, start: str, end: str):
         ], check=True, timeout=600)
 
         # Stream du résultat
-        file_stream = open(output_file, "rb")
-        return StreamingResponse(file_stream, media_type="video/mp4")
+        return StreamingResponse(open(output_file, "rb"), media_type="video/mp4")
 
     except subprocess.TimeoutExpired:
         raise HTTPException(408, "Timeout FFmpeg")
     finally:
+        # Nettoyage du fichier d'entrée uniquement
         if os.path.exists(input_file):
             os.remove(input_file)
