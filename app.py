@@ -37,9 +37,15 @@ async def cut_video(request: CutRequest, background_tasks: BackgroundTasks):
     input_file = os.path.join(tmp, f"{job_id}_in.mp4")
     output_file = os.path.join(tmp, f"{job_id}_out.mp4")
 
+<<<<<<< HEAD
     print(f"\n--- NOUVELLE REQUÊTE JSON [{job_id}] ---")
     print(f"URL: {request.url}")
     print(f"Periode: {request.start} -> {request.end}")
+=======
+    print(f"\n--- NOUVELLE REQUÊTE [{job_id}] ---")
+    print(f"URL: {url}")
+    print(f"Periode: {start} -> {end}")
+>>>>>>> 9935b61b7da2cd8a021eb0cdaa33bd4e33334bce
 
     # Headers pour éviter d'être bloqué par certains CDN (comme Vercel Blob)
     headers = {
@@ -49,9 +55,15 @@ async def cut_video(request: CutRequest, background_tasks: BackgroundTasks):
     try:
         # Télécharger la vidéo depuis l'URL (Vercel Blob)
         print(f"[1/3] Téléchargement de la vidéo en cours...")
+<<<<<<< HEAD
         logger.info(f"Téléchargement de la vidéo : {request.url}")
         
         with requests.get(request.url, stream=True, headers=headers, timeout=30) as r:
+=======
+        logger.info(f"Téléchargement de la vidéo : {url}")
+        
+        with requests.get(url, stream=True, headers=headers, timeout=30) as r:
+>>>>>>> 9935b61b7da2cd8a021eb0cdaa33bd4e33334bce
             if r.status_code != 200:
                 print(f"ERROR: Échec du téléchargement (Status: {r.status_code})")
                 logger.error(f"Échec du téléchargement : {r.status_code}")
@@ -66,7 +78,11 @@ async def cut_video(request: CutRequest, background_tasks: BackgroundTasks):
                 print(f"Done. {downloaded} octets téléchargés.")
         
         print(f"[2/3] Début de la découpe FFmpeg...")
+<<<<<<< HEAD
         logger.info(f"Début de la découpe FFmpeg ({request.start} -> {request.end})")
+=======
+        logger.info(f"Début de la découpe FFmpeg ({start} -> {end})")
+>>>>>>> 9935b61b7da2cd8a021eb0cdaa33bd4e33334bce
         
         # Configuration de la commande FFmpeg
         command = [
@@ -116,4 +132,7 @@ async def cut_video(request: CutRequest, background_tasks: BackgroundTasks):
         cleanup_files(input_file, output_file)
         raise HTTPException(status_code=500, detail=str(e))
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 9935b61b7da2cd8a021eb0cdaa33bd4e33334bce
