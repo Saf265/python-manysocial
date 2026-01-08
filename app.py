@@ -1,87 +1,145 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import subprocess, uuid, os, tempfile
-import logging
+import subprocess, uuid, os, tempfile, logging, requests
 
-# Configuration du logging
+# =========================
+# CONFIG
+# =========================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 app = FastAPI()
 
-# Modèle pour le corps de la requête JSON
-class CutRequest(BaseModel):
+# =========================
+# MODELS
+# =========================
+class Highlight(BaseModel):
+    start_time: float
+    end_time: float
+    reason: str
+
+class MergeRequest(BaseModel):
     url: str
-    start: str
-    end: str
+    highlights: list[Highlight]
 
-def cleanup_files(*filenames):
-    """Supprime les fichiers temporaires après la réponse."""
-    print(f"\n[CLEANUP] Début du nettoyage des fichiers...")
-    for filename in filenames:
-        try:
-            if os.path.exists(filename):
-                os.remove(filename)
-                print(f"[CLEANUP] Fichier supprimé : {filename}")
-                logger.info(f"Fichier supprimé : {filename}")
-        except Exception as e:
-            print(f"[CLEANUP] Erreur lors de la suppression de {filename} : {e}")
-            logger.error(f"Erreur lors de la suppression de {filename} : {e}")
+# =========================
+# HELPERS
+# =========================
+def download_video(url: str, path: str):
+    with requests.get(url, stream=True) as r:
+        r.raise_for_status()
+        with open(path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
 
-@app.post("/cut")
-async def cut_video(request: CutRequest, background_tasks: BackgroundTasks):
-    job_id = str(uuid.uuid4())
-    tmp = tempfile.gettempdir()
-    output_file = os.path.join(tmp, f"{job_id}_out.mp4")
+def upload_to_vercel_blob(path: str) -> str:
+    token = os.environ.get("VERCEL_BLOB_RW_TOKEN")
+    if not token:
+        raise Exception("Missing VERCEL_BLOB_RW_TOKEN")
 
-    print(f"\n--- NOUVELLE REQUÊTE JSON [{job_id}] ---")
-    print(f"URL: {request.url}")
-    print(f"Periode: {request.start} -> {request.end}")
-
-    try:
-        print(f"[1/2] Découpe FFmpeg directe depuis l'URL...")
-        logger.info(f"Découpe FFmpeg ({request.start} -> {request.end}) pour {request.url}")
-
-        # Commande FFmpeg : lecture directe depuis l'URL
-        command = [
-            "ffmpeg",
-            "-ss", request.start,
-            "-to", request.end,
-            "-i", request.url,
-            "-c", "copy",
-            "-avoid_negative_ts", "1",
-            output_file,
-            "-y"
-        ]
-
-        print(f"Running command: {' '.join(command)}")
-        result = subprocess.run(command, capture_output=True, text=True, timeout=600)
-
-        if result.returncode != 0:
-            print(f"ERROR: Erreur FFmpeg : {result.stderr}")
-            logger.error(f"Erreur FFmpeg : {result.stderr}")
-            raise HTTPException(status_code=500, detail="Erreur lors du traitement de la vidéo")
-
-        print(f"FFmpeg terminé avec succès.")
-
-        # Planifier la suppression du fichier après l'envoi
-        print(f"[2/2] Envoi du fichier et planification du nettoyage...")
-        background_tasks.add_task(cleanup_files, output_file)
-
-        return FileResponse(
-            path=output_file,
-            filename=f"cut_{job_id}.mp4",
-            media_type="video/mp4"
+    with open(path, "rb") as f:
+        res = requests.post(
+            "https://blob.vercel-storage.com/upload",
+            headers={
+                "Authorization": f"Bearer {token}"
+            },
+            files={
+                "file": (os.path.basename(path), f, "video/mp4")
+            }
         )
 
-    except subprocess.TimeoutExpired:
-        print("ERROR: Timeout FFmpeg")
-        logger.error("Timeout FFmpeg")
-        cleanup_files(output_file)
-        raise HTTPException(status_code=408, detail="Le traitement a pris trop de temps")
+    res.raise_for_status()
+    return res.json()["url"]
+
+# =========================
+# ROUTE /merge
+# =========================
+@app.post("/merge")
+async def merge_video(request: MergeRequest):
+    job_id = str(uuid.uuid4())
+    tmp = tempfile.gettempdir()
+
+    input_video = os.path.join(tmp, f"{job_id}_input.mp4")
+    output_video = os.path.join(tmp, f"{job_id}_merged.mp4")
+    concat_file = os.path.join(tmp, f"{job_id}_concat.txt")
+    segments = []
+
+    adapted_times = []
+    current_time = 0.0
+
+    try:
+        print(f"\n--- MERGE JOB {job_id} ---")
+        print("Downloading source video...")
+        download_video(request.url, input_video)
+
+        # 1️⃣ Découpe + recalcul des temps
+        for i, h in enumerate(request.highlights):
+            seg = os.path.join(tmp, f"{job_id}_seg_{i}.mp4")
+            duration = h.end_time - h.start_time
+
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss", str(h.start_time),
+                "-i", input_video,
+                "-t", str(duration),
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "23",
+                "-c:a", "aac",
+                seg
+            ]
+
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+            segments.append(seg)
+
+            adapted_times.append({
+                "start_time": round(current_time, 2),
+                "end_time": round(current_time + duration, 2),
+                "reason": h.reason
+            })
+
+            print(
+                f"[HIGHLIGHT] {round(current_time,2)}s → {round(current_time + duration,2)}s | {h.reason}"
+            )
+
+            current_time += duration
+
+        # 2️⃣ Concat
+        with open(concat_file, "w") as f:
+            for s in segments:
+                f.write(f"file '{s}'\n")
+
+        subprocess.run([
+            "ffmpeg",
+            "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_file,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "aac",
+            output_video
+        ], capture_output=True, text=True, check=True)
+
+        # 3️⃣ Upload vers Vercel Blob
+        print("Uploading merged video to Vercel Blob...")
+        blob_url = upload_to_vercel_blob(output_video)
+
+        return {
+            "video_url": blob_url,
+            "highlights": adapted_times,
+            "duration": round(current_time, 2)
+        }
+
+    except subprocess.CalledProcessError as e:
+        print("FFMPEG ERROR:", e.stderr)
+        raise HTTPException(status_code=500, detail="FFmpeg failed")
+
     except Exception as e:
-        print(f"ERROR INATTENDUE: {e}")
-        logger.error(f"Erreur inattendue : {e}")
-        cleanup_files(output_file)
         raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        for f in [input_video, output_video, concat_file, *segments]:
+            if f and os.path.exists(f):
+                os.remove(f)
